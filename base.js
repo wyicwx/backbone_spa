@@ -1,8 +1,27 @@
 /**
- * 基于Backbone的MVC模块
+ * MVC framework based Backbone 
+ * @description origin app 
  */
-define('helper/base', function(require, exports) {
-	var app = exports;
+
+(function (root, factory) {
+    if (typeof define === 'function' && define.amd) {
+        // AMD. Register as an anonymous module.
+        define([], factory);
+    } else if (typeof exports === 'object') {
+        // CommonJS
+        factory(exports);
+    } else {
+        // Browser globals
+        factory((root.app = {}));
+    }
+}(this, function (exports) {
+    var app = exports;
+	var singleton = function() {
+		if(!this.__instache) {
+			this.__instache = new this();
+		}
+		return this.__instache;
+	};
 	/**
 	 * 自动加载函数，cmd/amd
 	 * @abstract
@@ -10,69 +29,83 @@ define('helper/base', function(require, exports) {
 	app.autoload = function(module, callback) {
 		throw new Error('app.autoload is abstract function, override it.');
 	};
-	
+	/**
+	 * 扩展的View类，添加了ajax管理
+	 */
 	app.BaseView = Backbone.View.extend({
 		app: app,
-		super: function(fn) {
-			
-		},
 		constructor: function() {
-			this.ajaxQueue = {};
+			this.ajaxQueue = [];
 			app.BaseView.__super__.constructor.apply(this, arguments);
 		},
-		viewWillAddStage: function() {},
-		viewAddedStage: function() {},
-		viewWillRemoveStage: function() {},
-		viewRemovedStage: function() {},
-		viewBeActive: function() {},
-		viewBeInActive: function() {},
-		ajax: function() {
-			return Backbone.ajax.apply(this, arguments);
+		ajax: function(def) {
+			var view = this;
+			var promise = Backbone.ajax.apply(this, arguments);
+			if(def) {
+
+			}
+			if(!promise.abort) {
+				throw new Error('');
+			}
+			promise.always(function() {
+				var queue = view.ajaxQueue;
+				var index = queue.indexOf(promise);
+				queue.splice(index, 1);
+			});
+			this.ajaxQueue.push(promise);
+			return promise;
+		},
+		abortAjaxQueue: function() {
+			var view = this;
+			_.each(view.ajaxQueue, function(promise) {
+				if(promise.abort) {
+					promise.abort();
+				}
+			});
+			this.ajaxQueue.length = 0;
 		}
 	}, {
-		singleton: function() {
-			if(!this.__instache) {
-				this.__instache = new this();
-			}
-			return this.__instache;
-		}
+		singleton: singleton
 	});
 
 	app.BaseModel = Backbone.Model.extend({
 		app: app
 	}, {
-		singleton: function() {
-			if(!this.__singleton) {
-				this.__singleton = new this();
-			}
-			return this.__singleton;
-		}
+		singleton: singleton
 	});
 
 	app.BaseCollection = Backbone.Collection.extend({
 		app: app
 	}, {
-		singleton: function() {
-			if(!this.__singleton) {
-				this.__singleton = new this();
-			}
-			return this.__singleton;
-		}
+		singleton: singleton
 	});
 
-	app.MainView = app.BaseView.extend({});
+	app.MainView = app.BaseView.extend({
+		el: document.body
+	});
 
-	app.ActionView = app.BaseView.extend({});
+	app.ActionView = app.BaseView.extend({
+		viewWillAddStage: function() {},
+		viewAddedStage: function() {},
+		viewBeActive: function() {},
+		viewBeInActive: function() {}
+	});
 
-	app.ControllerView = app.BaseView.extend({
-		app: app,
+	app.TPActionView = app.ActionView.extend({
+		viewWillRemoveStage: function() {},
+		viewRemovedStage: function() {},
+		destroy: function() {}
+	});
+
+	app.ControllerView = app.ActionView.extend({
 		defaultAction: 'index',
+		errorAction: null,
 		Actions: {},
 		activeParams: null,
 		activeAction: null,
 		prepareAction: function(action) {
 			if(!action || !(action in this.Actions)) {
-				action = this.defaultAction;
+				action = this.errorAction || this.defaultAction;
 			}
 			if(!(action in this.actions)) {
 				var ActionClass = this.Actions[action].extend({
@@ -80,11 +113,16 @@ define('helper/base', function(require, exports) {
 				});
 				this.actions[action] = new ActionClass();
 				this.actions[action].$el.addClass(action+'Action');
-				this.actions[action].viewWillAddStage();
-				this.$el.append(this.actions[action].$el);
-				this.actions[action].viewAddedStage();
 			}
 			return action;
+		},
+		runAction: function(action) {
+			if(!this.actions[action].onStage) {
+				this.actions[action].onStage = true;
+				this.actions[action].viewWillAddStage();
+				this.$el.append(this.actions[action].$el.show());
+				this.actions[action].viewAddedStage();
+			}
 		},
 		dispath: function(action, rawParams) {
 			var actionInstance = this.actions[action];
@@ -98,12 +136,19 @@ define('helper/base', function(require, exports) {
 			actionInstance.viewBeActive(this.activeParams);
 		},
 		destroyAction: function() {
-			_.each(this.actions, function(action) {
-				action.viewWillRemoveStage();
-				action.$el.remove();
-				action.viewRemovedStage();
+			var controller = this;
+			_.each(this.actions, function(action, name) {
+				if(action instanceof app.TPActionView) {
+					action.viewWillRemoveStage();
+					action.$el.remove();
+					action.viewRemovedStage();
+					action.destroy();
+					delete controller.actions[name];
+				} else {
+					action.$el.hide();
+					action.onStage = false;
+				}
 			});
-			this.actions = {};
 		},
 		constructor: function() {
 			this.actions = {};
@@ -122,7 +167,9 @@ define('helper/base', function(require, exports) {
 			var values = _.reject(rawParams, function(value, key){ return key % 2 == 0; });
 
 			return _.object(keys, values);
-		}
+		},
+		viewWillRemoveStage: function() {},
+		viewRemovedStage: function() {}
 	});
 
 	/**
@@ -146,19 +193,27 @@ define('helper/base', function(require, exports) {
 		defaultController: 'index',
 		errorController: null,
 		mainView: null,
-		// routing entrance
+		/**
+		 * 路由路口
+		 * @description 
+		 * 由url上取得controller、action
+		 * -》解析controller是否存在，不存在则使用errorController，若无则defaultController
+		 * -》
+		 */
 		router: function(controller, action, params) {
 			params || (params = '');
 			var rawParams;
-			var self = this;
-			if(!(controller in this.Controller)) {
+			var router = this;
+
+			if(!(controller in router.Controller)) {
 				rawParams = _.compact([controller, action, params]).join('/');
-				controller = this.errorController || this.defaultController;
+				controller = router.errorController || router.defaultController;
 			}
 
-			this.prepareController(controller, function(controllerInstance) {
+			router.prepareController(controller, function(controllerInstance) {
 				var activeAction = controllerInstance.prepareAction(action);
-				self.activeAction = activeAction;
+				router.activeAction = activeAction;
+
 				if(!rawParams) {
 					if(activeAction != action) {
 						rawParams = _.compact([action, params]).join('/');
@@ -167,20 +222,21 @@ define('helper/base', function(require, exports) {
 					}
 				}
 
-				if(controller != self.activeController) {
-					if(self.activeController) {
-						self.controllers[self.activeController].destroyAction();
-						self.controllers[self.activeController].viewWillRemoveStage();
-						self.controllers[self.activeController].$el.remove();
-						self.controllers[self.activeController].viewRemovedStage();
-						self.previousController = self.activeController;
+				if(controller != router.activeController) {
+					if(router.activeController) {
+						var preControllerInstance = router.controllers[router.activeController];
+						preControllerInstance.destroyAction();
+						preControllerInstance.$el.hide();
+						router.previousAction = preControllerInstance.activeAction;
+						router.previousController = router.activeController;
 					}
 
 					controllerInstance.viewWillAddStage();
-					self.mainView.$el.append(controllerInstance.$el);
+					router.mainView.$el.append(controllerInstance.$el.show());
 					controllerInstance.viewAddedStage();
 				}
-				self.activeController = controller;
+				router.activeController = controller;
+				controllerInstance.runAction(activeAction);
 
 				controllerInstance.viewBeActive();
 				controllerInstance.dispath(activeAction, rawParams);
@@ -209,5 +265,4 @@ define('helper/base', function(require, exports) {
 			}
 		}
 	});
-
-});
+}));
